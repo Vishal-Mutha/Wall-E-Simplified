@@ -1,0 +1,191 @@
+#include <stdio.h>
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+#include "driver/i2c.h"
+#include "esp_log.h"
+#include <string.h>
+
+#define I2C_MASTER_SCL_IO           22      // GPIO for I2C SCL
+#define I2C_MASTER_SDA_IO           21      // GPIO for I2C SDA
+#define I2C_MASTER_NUM              I2C_NUM_0
+#define I2C_MASTER_FREQ_HZ          400000
+#define OLED_I2C_ADDRESS            0x3C    // Usually 0x3C or 0x3D
+
+static const char *TAG = "OLED";
+
+// SSD1306 Commands
+#define OLED_CMD_DISPLAY_OFF        0xAE
+#define OLED_CMD_DISPLAY_ON         0xAF
+#define OLED_CMD_SET_CONTRAST       0x81
+#define OLED_CMD_SET_PAGE_ADDR      0xB0
+#define OLED_CMD_SET_COL_ADDR_LOW   0x00
+#define OLED_CMD_SET_COL_ADDR_HIGH  0x10
+
+// Simple 5x7 font (ASCII 32-127)
+static const uint8_t font5x7[][5] = {
+    {0x00, 0x00, 0x00, 0x00, 0x00}, // Space
+    {0x00, 0x00, 0x5F, 0x00, 0x00}, // !
+    {0x00, 0x07, 0x00, 0x07, 0x00}, // "
+    {0x14, 0x7F, 0x14, 0x7F, 0x14}, // #
+    {0x24, 0x2A, 0x7F, 0x2A, 0x12}, // $
+    {0x23, 0x13, 0x08, 0x64, 0x62}, // %
+    {0x36, 0x49, 0x55, 0x22, 0x50}, // &
+    {0x00, 0x05, 0x03, 0x00, 0x00}, // '
+    {0x00, 0x1C, 0x22, 0x41, 0x00}, // (
+    {0x00, 0x41, 0x22, 0x1C, 0x00}, // )
+    {0x14, 0x08, 0x3E, 0x08, 0x14}, // *
+    {0x08, 0x08, 0x3E, 0x08, 0x08}, // +
+    {0x00, 0x50, 0x30, 0x00, 0x00}, // ,
+    {0x08, 0x08, 0x08, 0x08, 0x08}, // -
+    {0x00, 0x60, 0x60, 0x00, 0x00}, // .
+    {0x20, 0x10, 0x08, 0x04, 0x02}, // /
+    {0x3E, 0x51, 0x49, 0x45, 0x3E}, // 0
+    {0x00, 0x42, 0x7F, 0x40, 0x00}, // 1
+    {0x42, 0x61, 0x51, 0x49, 0x46}, // 2
+    {0x21, 0x41, 0x45, 0x4B, 0x31}, // 3
+    {0x18, 0x14, 0x12, 0x7F, 0x10}, // 4
+    {0x27, 0x45, 0x45, 0x45, 0x39}, // 5
+    {0x3C, 0x4A, 0x49, 0x49, 0x30}, // 6
+    {0x01, 0x71, 0x09, 0x05, 0x03}, // 7
+    {0x36, 0x49, 0x49, 0x49, 0x36}, // 8
+    {0x06, 0x49, 0x49, 0x29, 0x1E}, // 9
+    {0x00, 0x36, 0x36, 0x00, 0x00}, // :
+    {0x00, 0x56, 0x36, 0x00, 0x00}, // ;
+    {0x08, 0x14, 0x22, 0x41, 0x00}, // <
+    {0x14, 0x14, 0x14, 0x14, 0x14}, // =
+    {0x00, 0x41, 0x22, 0x14, 0x08}, // >
+    {0x02, 0x01, 0x51, 0x09, 0x06}, // ?
+    {0x32, 0x49, 0x79, 0x41, 0x3E}, // @
+    {0x7E, 0x11, 0x11, 0x11, 0x7E}, // A
+    {0x7F, 0x49, 0x49, 0x49, 0x36}, // B
+    {0x3E, 0x41, 0x41, 0x41, 0x22}, // C
+    {0x7F, 0x41, 0x41, 0x22, 0x1C}, // D
+    {0x7F, 0x49, 0x49, 0x49, 0x41}, // E
+    {0x7F, 0x09, 0x09, 0x09, 0x01}, // F
+    {0x3E, 0x41, 0x49, 0x49, 0x7A}, // G
+    {0x7F, 0x08, 0x08, 0x08, 0x7F}, // H
+    {0x00, 0x41, 0x7F, 0x41, 0x00}, // I
+    {0x20, 0x40, 0x41, 0x3F, 0x01}, // J
+    {0x7F, 0x08, 0x14, 0x22, 0x41}, // K
+    {0x7F, 0x40, 0x40, 0x40, 0x40}, // L
+    {0x7F, 0x02, 0x0C, 0x02, 0x7F}, // M
+    {0x7F, 0x04, 0x08, 0x10, 0x7F}, // N
+    {0x3E, 0x41, 0x41, 0x41, 0x3E}, // O
+    {0x7F, 0x09, 0x09, 0x09, 0x06}, // P
+    {0x3E, 0x41, 0x51, 0x21, 0x5E}, // Q
+    {0x7F, 0x09, 0x19, 0x29, 0x46}, // R
+    {0x46, 0x49, 0x49, 0x49, 0x31}, // S
+    {0x01, 0x01, 0x7F, 0x01, 0x01}, // T
+    {0x3F, 0x40, 0x40, 0x40, 0x3F}, // U
+    {0x1F, 0x20, 0x40, 0x20, 0x1F}, // V
+    {0x3F, 0x40, 0x38, 0x40, 0x3F}, // W
+    {0x63, 0x14, 0x08, 0x14, 0x63}, // X
+    {0x07, 0x08, 0x70, 0x08, 0x07}, // Y
+    {0x61, 0x51, 0x49, 0x45, 0x43}, // Z
+};
+
+// I2C write command
+static esp_err_t oled_write_cmd(uint8_t cmd) {
+    uint8_t data[2] = {0x00, cmd};
+    return i2c_master_write_to_device(I2C_MASTER_NUM, OLED_I2C_ADDRESS, data, 2, pdMS_TO_TICKS(1000));
+}
+
+// I2C write data
+static esp_err_t oled_write_data(uint8_t *data, size_t len) {
+    uint8_t *buf = malloc(len + 1);
+    buf[0] = 0x40;
+    memcpy(buf + 1, data, len);
+    esp_err_t ret = i2c_master_write_to_device(I2C_MASTER_NUM, OLED_I2C_ADDRESS, buf, len + 1, pdMS_TO_TICKS(1000));
+    free(buf);
+    return ret;
+}
+
+// Initialize OLED
+static void oled_init(void) {
+    oled_write_cmd(OLED_CMD_DISPLAY_OFF);
+    oled_write_cmd(0x20); // Set memory addressing mode
+    oled_write_cmd(0x00); // Horizontal addressing mode
+    oled_write_cmd(0xB0); // Set page start address
+    oled_write_cmd(0xC8); // Set COM output scan direction
+    oled_write_cmd(0x00); // Set low column address
+    oled_write_cmd(0x10); // Set high column address
+    oled_write_cmd(0x40); // Set start line address
+    oled_write_cmd(OLED_CMD_SET_CONTRAST);
+    oled_write_cmd(0xFF);
+    oled_write_cmd(0xA1); // Set segment re-map
+    oled_write_cmd(0xA6); // Set normal display
+    oled_write_cmd(0xA8); // Set multiplex ratio
+    oled_write_cmd(0x3F);
+    oled_write_cmd(0xA4); // Output follows RAM content
+    oled_write_cmd(0xD3); // Set display offset
+    oled_write_cmd(0x00);
+    oled_write_cmd(0xD5); // Set display clock divide ratio
+    oled_write_cmd(0xF0);
+    oled_write_cmd(0xD9); // Set pre-charge period
+    oled_write_cmd(0x22);
+    oled_write_cmd(0xDA); // Set COM pins hardware configuration
+    oled_write_cmd(0x12);
+    oled_write_cmd(0xDB); // Set VCOMH
+    oled_write_cmd(0x20);
+    oled_write_cmd(0x8D); // Enable charge pump
+    oled_write_cmd(0x14);
+    oled_write_cmd(OLED_CMD_DISPLAY_ON);
+}
+
+// Clear display
+static void oled_clear(void) {
+    uint8_t zero[128] = {0};
+    for (int page = 0; page < 8; page++) {
+        oled_write_cmd(0xB0 + page);
+        oled_write_cmd(0x00);
+        oled_write_cmd(0x10);
+        oled_write_data(zero, 128);
+    }
+}
+
+// Display string at position
+static void oled_display_string(uint8_t page, uint8_t col, const char *str) {
+    oled_write_cmd(0xB0 + page);
+    oled_write_cmd(col & 0x0F);
+    oled_write_cmd(0x10 | (col >> 4));
+    
+    while (*str) {
+        if (*str >= 32 && *str <= 90) {
+            oled_write_data((uint8_t *)font5x7[*str - 32], 5);
+            uint8_t space = 0x00;
+            oled_write_data(&space, 1);
+        }
+        str++;
+    }
+}
+
+void app_main(void) {
+    // Configure I2C
+    i2c_config_t conf = {
+        .mode = I2C_MODE_MASTER,
+        .sda_io_num = I2C_MASTER_SDA_IO,
+        .scl_io_num = I2C_MASTER_SCL_IO,
+        .sda_pullup_en = GPIO_PULLUP_ENABLE,
+        .scl_pullup_en = GPIO_PULLUP_ENABLE,
+        .master.clk_speed = I2C_MASTER_FREQ_HZ,
+    };
+    
+    i2c_param_config(I2C_MASTER_NUM, &conf);
+    i2c_driver_install(I2C_MASTER_NUM, conf.mode, 0, 0, 0);
+    
+    ESP_LOGI(TAG, "I2C initialized successfully");
+    
+    // Initialize OLED
+    vTaskDelay(pdMS_TO_TICKS(100));
+    oled_init();
+    oled_clear();
+    
+    ESP_LOGI(TAG, "OLED initialized successfully");
+    
+    // Display strings
+    oled_display_string(0, 0, "HELLO ESP32");
+    oled_display_string(2, 0, "OLED DISPLAY");
+    oled_display_string(4, 0, "128X64 PIXELS");
+    
+    ESP_LOGI(TAG, "String displayed");
+}
